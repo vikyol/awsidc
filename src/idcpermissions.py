@@ -113,6 +113,36 @@ def get_principal_name(identity_store_id, user_id):
     except identitystore_client.exceptions.ResourceNotFoundException:
         return "Unknown"
 
+
+def get_group_id_by_name(identity_store_id, group_name):
+    """
+    Fetches the group ID from AWS Identity Center (formerly AWS SSO) based on the group name.
+    
+    Args:
+    - identity_store_id (str): The ID of the AWS Identity Center (SSO) Identity Store.
+    - group_name (str): The name of the group whose ID you want to retrieve.
+    
+    Returns:
+    - str: The ID of the group if found, otherwise None.
+    """
+    client = boto3.client('identitystore')
+
+    try:
+        # Paginate through groups to find the matching group name
+        paginator = client.get_paginator('list_groups')
+        for page in paginator.paginate(IdentityStoreId=identity_store_id):
+            for group in page['Groups']:
+                if group['DisplayName'] == group_name:
+                    return group['GroupId']
+        
+        print(f"Group '{group_name}' not found.")
+        return None
+    
+    except Exception as e:
+        print(f"An error occurred while fetching the group ID: {e}")
+        return None
+
+
 def list_account_assignments(instance_arn, account_id):
     sso_admin_client = boto3.client('sso-admin')
     
@@ -209,7 +239,46 @@ def assign_users_to_permission_set(instance_arn, account_id, permission_set_arn,
             print(f"Failed to assign user {user_id} to permission set {permission_set_arn} in account {account_id}: {e}")
 
 
-def remove_user_permission_sets(instance_arn, account_id, user_id, permission_set=None):
+def assign_principal_to_permission_set(instance_arn, account_id, principal_id, principal_type, permission_set_arn):
+    """
+    Assigns a permission set to a principal (user or group) in AWS Identity Center (formerly AWS SSO) for a specified AWS account.
+    
+    Args:
+    - instance_arn (str): The ARN of the AWS Identity Center instance.
+    - account_id (str): The AWS account ID where the permission set will be assigned.
+    - principal_id (str): The ID of the user or group in AWS Identity Center.
+    - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
+    - permission_set_arn (str): The ARN of the permission set to assign.
+    
+    Returns:
+    - str: The status of the assignment operation.
+    """
+    client = boto3.client('sso-admin')
+    
+    if principal_type not in ['USER', 'GROUP']:
+        raise ValueError("principal_type must be either 'USER' or 'GROUP'.")
+
+    try:
+        # Create the assignment for the principal (user or group)
+        response = client.create_account_assignment(
+            InstanceArn=instance_arn,
+            TargetId=account_id,
+            TargetType='AWS_ACCOUNT',
+            PermissionSetArn=permission_set_arn,
+            PrincipalType=principal_type,
+            PrincipalId=principal_id
+        )
+        
+        # Check the status of the operation
+        status = response['AccountAssignmentCreationStatus']['Status']
+        return status
+    
+    except Exception as e:
+        print(f"An error occurred while assigning the permission set: {e}")
+        return None
+
+
+def revoke_permission_set_assignment(instance_arn, account_id, principal_id, principal_type, permission_set=None):
     sso_admin_client = boto3.client('sso-admin')
    
     permission_sets = []
@@ -223,17 +292,58 @@ def remove_user_permission_sets(instance_arn, account_id, user_id, permission_se
     for permission_set_arn in permission_sets:
         assignments = get_account_assignments(instance_arn, account_id, permission_set_arn)
         for assignment in assignments:
-            if assignment['PrincipalId'] == user_id and assignment['PrincipalType'] == 'USER':
+            if assignment['PrincipalId'] == principal_id and assignment['PrincipalType'] == principal_type:
                 sso_admin_client.delete_account_assignment(
                     InstanceArn=instance_arn,
                     TargetId=account_id,
                     TargetType='AWS_ACCOUNT',
                     PermissionSetArn=permission_set_arn,
-                    PrincipalType='USER',
-                    PrincipalId=user_id
+                    PrincipalType=principal_type,
+                    PrincipalId=principal_id
                 )
-                print(f"Removed permission set {permission_set_arn} for user {user_id} from account {account_id}")
+                print(f"Removed permission set {permission_set_arn} assignment for {principal_id} from the account {account_id}")
     
+
+def revoke_all_permissions(instance_arnr, account_id, principal_id, principal_type):
+    """
+    Revokes all permission sets assigned to a user or group in AWS Identity Center (formerly AWS SSO).
+    
+    Args:
+    - instance_arn (str): The ARN of the AWS Identity Center instance.
+    - account_id (str): The AWS account ID where the permission set is assigned.
+    - principal_id (str): The ID of the user or group whose permissions are to be revoked.
+    - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
+    
+    Returns:
+    - None
+    """
+    client = boto3.client('sso-admin')
+
+    try:
+        # List all permission sets for the account
+        paginator = client.get_paginator('list_account_assignments')
+        for page in paginator.paginate(
+            InstanceArn=instance_arn,
+            AccountId=account_id,
+            PrincipalType=principal_type,
+            PrincipalId=principal_id
+        ):
+            for assignment in page['AccountAssignments']:
+                permission_set_arn = assignment['PermissionSetArn']
+                
+                # Revoke the permission set assignment
+                revoke_permission_set_assignment(
+                    instance_arn,
+                    account_id,
+                    principal_id,
+                    principal_type,
+                    permission_set_arn
+                )
+                print(f"Revoked permission set {permission_set_arn} from {principal_type.lower()} {principal_id}.")
+    
+    except Exception as e:
+        print(f"An error occurred while revoking permission sets: {e}")
+
 
 
 def load_json(file_path):
@@ -350,51 +460,57 @@ def process_batch_permissions(instance_arn, data):
     
 
     for assignment in assign_data:
-        permission_set = get_permission_set_arn(instance_arn, assignment['permissionSet'])
-        accountId = assignment['accountId']
-        accountName = get_account_name(accountId)
-        user_ids = []
+        permission_set_arn = get_permission_set_arn(instance_arn, assignment['permissionSet'])
+        account_id = assignment['accountId']
+        account_name = get_account_name(account_id)
         
         users = assignment.get('users', [])
+        principal_type = 'USER'
         if len(users) > 0:
-            print(f"Assigning the following users {assignment['permissionSet']}({permission_set}) in {accountName} ({accountId})")
+            print(f"Assigning the following users {assignment['permissionSet']}({permission_set_arn}) in {account_name} ({account_id})")
         for user in users:
             print(f"    - {user}")
             user_id = get_identity_center_user_id(get_identity_store_id(instance_arn), user)
             if user_id:
-                user_ids.append(user_id)
+                assign_principal_to_permission_set(instance_arn, account_id, user_id, principal_type, permission_set_arn)
             
-        assign_users_to_permission_set(instance_arn, accountId, permission_set, user_ids)
+
 
         groups = assignment.get('groups', [])
+        principal_type = 'GROUP'
         if len(groups) > 0:
-            print(f"Assigning the following groups {assignment['permissionSet']}({permission_set}) in account {accountName} {accountId})")
+            print(f"Assigning the following groups {assignment['permissionSet']}({permission_set_arn}) in account {account_name} {account_id})")
         for group in groups:
             print(f"    - {group}")
-            #assign_groups_to_permission_set(instance_arn, assignment['account_id'], permission_set, user)
+            group_id = get_group_id_by_name(get_identity_store_id(instance_arn), group)
+            assign_principal_to_permission_set(instance_arn, account_id, group_id, principal_type, permission_set_arn)
     
     # Process all permission sets to be revoked
     for revocation in revoke_data:
-        permission_set = get_permission_set_arn(instance_arn, revocation['permissionSet'])
+        permission_set_arn = get_permission_set_arn(instance_arn, revocation['permissionSet'])
         account_id = revocation['accountId']
         account_name = get_account_name(account_id)
         
         users = revocation.get('users', [])
         if len(users) > 0:
-            print(f"Revoking the following users {revocation['permissionSet']}({permission_set}) in {account_name} ({account_id})")
-        for user in users:
-            print(f"    - {user}")
-            user_id = get_identity_center_user_id(get_identity_store_id(instance_arn), user)
-            if user_id:
-                remove_user_permission_sets(instance_arn, account_id, user_id, permission_set)
+            principal_type = 'USER'
+            print(f"Revoking the permission set assignment {revocation['permissionSet']} ({permission_set_arn}) in account {account_name} ({account_id}) for the following users:")
+
+            for user in users:
+                print(f"    - {user}")
+                user_id = get_identity_center_user_id(get_identity_store_id(instance_arn), user)
+                if user_id:
+                    revoke_permission_set_assignment(instance_arn, account_id, user_id, principal_type, permission_set_arn)
             
 
         groups = revocation.get('groups', [])
         if len(groups) > 0:
-            print(f"Assigning the following groups {revocation['permissionSet']}({permission_set}) in account {account_name} {account_id})")
-        for group in groups:
-            print(f"    - {group}")
-            #assign_groups_to_permission_set(instance_arn, account_id, permission_set, group)
+            principal_type = 'GROUP'
+            print(f"Revoking the following permission set assignment {revocation['permissionSet']} ({permission_set_arn}) in account {account_name} ({account_id}) for the following groups")
+            for group in groups:
+                print(f"    - {group}")
+                group_id = get_group_id_by_name(get_identity_store_id(instance_arn), group)
+                revoke_permission_set_assignment(instance_arn, account_id, group_id, principal_type, permission_set_arn)
 
 
 def main():
@@ -462,13 +578,13 @@ def main():
     
     if args.remove and args.all:
         user_id = get_identity_store_id(args.username)
-        remove_user_permission_sets(args.instance_arn, args.account_id, user_id)
+        revole_all_permissions(args.instance_arn, args.account_id, user_id, 'USER')
     elif args.remove and args.permission_set:
         user_id = get_identity_store_id(args.username)
-        permission_set_arn = get_permission_set_arn(instance_arn, args.permission_set)
-        remove_user_permission_sets(args.instance_arn, args.account_id, user_id, permission_set_arn)
+        permission_set_arn = get_permission_set_arn(args.instance_arn, args.permission_set)
+        revoke_permission_set_assignment(instance_arn, account_id, user_id, 'USER', permission_set_arn)
     elif args.cleanup:
-        csleanup_orphaned_assignments(args.instance_arn, args.account_id) 
+        cleanup_orphaned_assignments(args.instance_arn, args.account_id) 
     elif args.assign:
         users = get_users_from_file(args.file)
         if len(users) > 0:
@@ -479,7 +595,6 @@ def main():
             process_batch_permissions(args.instance_arn, data)
 
         
-     
 
 if __name__ == "__main__":
     main()
