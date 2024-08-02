@@ -2,6 +2,74 @@ import boto3
 import argparse
 import sys
 import os
+import json
+
+def get_identity_center_user_id(identity_store_id, username):
+    """
+    Retrieves the AWS Identity Center (formerly AWS SSO) UserId for a given username.
+    
+    Args:
+    - identity_store_id (str): The ID of the Identity Store associated with your AWS Identity Center instance.
+    - username (str): The username in AWS Identity Center.
+    
+    Returns:
+    - str: The UserId of the user, or None if not found.
+    """
+    # Initialize a session using the default profile or environment variables
+    client = boto3.client('identitystore')
+    
+    try:
+        # Search for the user using the username
+        response = client.list_users(
+            IdentityStoreId=identity_store_id,
+            Filters=[{
+                'AttributePath': 'UserName',
+                'AttributeValue': username
+            }]
+        )
+        
+        # Check if the user is found and return the UserId
+        if response['Users']:
+            user_id = response['Users'][0]['UserId']
+            return user_id
+        else:
+            print(f"User with username '{username}' not found.")
+            return None
+    
+    except Exception as e:
+        print(f"An error occurred while fetching the user ID: {e}")
+        return None
+
+
+
+def get_account_name(account_id):
+    """
+    Retrieves the name of an AWS account given its account ID.
+    
+    Args:
+    - account_id (str): The AWS account ID.
+    
+    Returns:
+    - str: The name of the AWS account, or None if not found.
+    """
+    # Initialize a session using the default profile or environment variables
+    client = boto3.client('organizations')
+    
+    try:
+        # Describe the account using the provided account ID
+        response = client.describe_account(AccountId=account_id)
+        
+        # Extract the account name from the response
+        account_name = response['Account']['Name']
+        return account_name
+    
+    except client.exceptions.AccountNotFoundException:
+        print(f"Account with ID {account_id} not found.")
+        return None
+    except Exception as e:
+        print(f"An error occurred while fetching the account name: {e}")
+        return None
+
 
 def get_permission_sets(instance_arn):
     sso_admin_client = boto3.client('sso-admin')
@@ -100,6 +168,29 @@ def get_account_assignments(instance_arn, account_id, permission_set_arn):
     return assignments
 
 
+"""
+Reads a list of user emails from a specified file.
+
+Args:
+- file_path (str): The path to the file containing user emails.
+
+Returns:
+- List[str]: A list of user emails.
+"""
+def get_users_from_file(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            # Read all lines from the file and strip any leading/trailing whitespace
+            users = [line.strip() for line in file if line.strip()]
+        return users
+    except FileNotFoundError:
+        print(f"Error: The file at {file_path} was not found.")
+        return []
+    except Exception as e:
+        print(f"An error occurred while reading the file: {e}")
+        return []
+
+
 def assign_users_to_permission_set(instance_arn, account_id, permission_set_arn, user_ids):
     sso_client = boto3.client('sso-admin')
 
@@ -118,37 +209,15 @@ def assign_users_to_permission_set(instance_arn, account_id, permission_set_arn,
             print(f"Failed to assign user {user_id} to permission set {permission_set_arn} in account {account_id}: {e}")
 
 
-def remove_user_permission_sets(instance_arn, account_id, username, permission_set=None):
-    identitystore_client = boto3.client('identitystore')
+def remove_user_permission_sets(instance_arn, account_id, user_id, permission_set=None):
     sso_admin_client = boto3.client('sso-admin')
-    
-    # Get Identity Store ID
-    instances = sso_admin_client.list_instances()
-    identity_store_id = instances['Instances'][0]['IdentityStoreId']
-    
-    # Get User ID
-    response = identitystore_client.list_users(
-        IdentityStoreId=identity_store_id,
-        Filters=[
-            {
-                'AttributePath': 'UserName',
-                'AttributeValue': username
-            }
-        ]
-    )
-    user_id = response['Users'][0]['UserId']
-    
+   
     permission_sets = []
     if permission_set == None:
         # Get all permission sets
         permission_sets = get_permission_sets(instance_arn)
     else:
-        ps_arn = get_permission_set_arn(instance_arn, permission_set)
-        if ps_arn:
-            print(f"Permission set arn: {ps_arn}")
-            permission_sets.append(ps_arn)
-        else:
-            sys.exit(f"Permission set cannot be found: {permission_set}")
+        permission_sets.append(permission_set)
             
     
     for permission_set_arn in permission_sets:
@@ -163,9 +232,33 @@ def remove_user_permission_sets(instance_arn, account_id, username, permission_s
                     PrincipalType='USER',
                     PrincipalId=user_id
                 )
-                print(f"Removed permission set {permission_set_arn} for user {username} from account {account_id}")
+                print(f"Removed permission set {permission_set_arn} for user {user_id} from account {account_id}")
     
 
+
+def load_json(file_path):
+    """
+    Loads JSON data from a specified file.
+    
+    Args:
+    - file_path (str): The path to the JSON file.
+    
+    Returns:
+    - dict: The parsed JSON data as a dictionary.
+    """
+    try:
+        with open(file_path, 'r') as file:
+            data = json.load(file)
+        return data
+    except FileNotFoundError:
+        print(f"Error: The file at {file_path} was not found.")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Error: Failed to parse JSON from {file_path}: {e}")
+        return {}
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        return {}
 
 def user_exists(identity_store_id, user_id):
     identitystore_client = boto3.client('identitystore')
@@ -250,6 +343,60 @@ def cleanup_orphaned_assignments_for_all_accounts(instance_arn):
     print("Orphaned assignments cleanup complete for all accounts.")
 
 
+def process_batch_permissions(instance_arn, data):
+    # Accessing specific parts of the JSON data
+    assign_data = data.get('assign', [])
+    revoke_data = data.get('revoke', [])
+    
+
+    for assignment in assign_data:
+        permission_set = get_permission_set_arn(instance_arn, assignment['permissionSet'])
+        accountId = assignment['accountId']
+        accountName = get_account_name(accountId)
+        user_ids = []
+        
+        users = assignment.get('users', [])
+        if len(users) > 0:
+            print(f"Assigning the following users {assignment['permissionSet']}({permission_set}) in {accountName} ({accountId})")
+        for user in users:
+            print(f"    - {user}")
+            user_id = get_identity_center_user_id(get_identity_store_id(instance_arn), user)
+            if user_id:
+                user_ids.append(user_id)
+            
+        assign_users_to_permission_set(instance_arn, accountId, permission_set, user_ids)
+
+        groups = assignment.get('groups', [])
+        if len(groups) > 0:
+            print(f"Assigning the following groups {assignment['permissionSet']}({permission_set}) in account {accountName} {accountId})")
+        for group in groups:
+            print(f"    - {group}")
+            #assign_groups_to_permission_set(instance_arn, assignment['account_id'], permission_set, user)
+    
+    # Process all permission sets to be revoked
+    for revocation in revoke_data:
+        permission_set = get_permission_set_arn(instance_arn, revocation['permissionSet'])
+        account_id = revocation['accountId']
+        account_name = get_account_name(account_id)
+        
+        users = revocation.get('users', [])
+        if len(users) > 0:
+            print(f"Revoking the following users {revocation['permissionSet']}({permission_set}) in {account_name} ({account_id})")
+        for user in users:
+            print(f"    - {user}")
+            user_id = get_identity_center_user_id(get_identity_store_id(instance_arn), user)
+            if user_id:
+                remove_user_permission_sets(instance_arn, account_id, user_id, permission_set)
+            
+
+        groups = revocation.get('groups', [])
+        if len(groups) > 0:
+            print(f"Assigning the following groups {revocation['permissionSet']}({permission_set}) in account {account_name} {account_id})")
+        for group in groups:
+            print(f"    - {group}")
+            #assign_groups_to_permission_set(instance_arn, account_id, permission_set, group)
+
+
 def main():
     parser = argparse.ArgumentParser(description = 'Manage AWS Permissions')
     parser.add_argument(
@@ -302,7 +449,6 @@ def main():
 
     # Parse the arguments
     args = parser.parse_args()
-
    # Check if --remove is provided
     if args.assign or args.remove or args.cleanup:
         # Enforce that --account_id and --username are required
@@ -315,11 +461,24 @@ def main():
     
     
     if args.remove and args.all:
-        remove_user_permission_sets(args.instance_arn, args.account_id, args.username)
+        user_id = get_identity_store_id(args.username)
+        remove_user_permission_sets(args.instance_arn, args.account_id, user_id)
     elif args.remove and args.permission_set:
-        remove_user_permission_sets(args.instance_arn, args.account_id, args.username, args.permission_set)
+        user_id = get_identity_store_id(args.username)
+        permission_set_arn = get_permission_set_arn(instance_arn, args.permission_set)
+        remove_user_permission_sets(args.instance_arn, args.account_id, user_id, permission_set_arn)
     elif args.cleanup:
-        cleanup_orphaned_assignments(args.instance_arn, args.account_id) 
+        csleanup_orphaned_assignments(args.instance_arn, args.account_id) 
+    elif args.assign:
+        users = get_users_from_file(args.file)
+        if len(users) > 0:
+            assign_users_to_permission_set(args.instance_arn, account_id, permission_set_arn, user_ids)
+    elif args.file:
+        data = load_json(args.file)
+        if data:
+            process_batch_permissions(args.instance_arn, data)
+
+        
      
 
 if __name__ == "__main__":

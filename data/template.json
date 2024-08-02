@@ -1,0 +1,24 @@
+{ 
+   "assign": [
+       {
+          "accountId": "100000000001",
+          "permissionSet": "Administrator",
+          "users": [
+                    "user1@aws.com", 
+                    "user2@aws.com"
+           ],
+          "groups": [
+                "groupName"
+            ]
+       }
+   ],
+   "revoke": [
+       {
+          "accountId": "100000000000",
+          "permissionSet": "Administrator",
+          "users": [
+               "user3@aws.com"           
+           ]
+       }
+   ]
+}

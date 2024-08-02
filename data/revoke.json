@@ -1,0 +1,27 @@
+{ 
+   "assign": [
+   ],
+   "revoke": [
+       {
+          "accountId": "999999999999",
+          "permissionSet": "PowerUser",
+                "boto3@aws.com",
+                "python@aws.com"
+           ]
+       },
+       {
+          "accountId": "0000111100001111",
+          "permissionSet": "AWSAdministratorAccess",
+          "groups": [
+            "Admins"
+          ]
+        },
+        {
+          "accountId": "1111000011110000",
+          "permissionSet": "AWSReadOnlyAccess",
+          "groups": [
+             "Auditors" 
+          ]
+        }
+    ]
+}

@@ -1,0 +1,13 @@
+{ 
+   "assign": [
+       {
+          "accountId": "000000000",
+          "permissionSet": "Developers",
+          "users": [
+              "john.doe@aws.com"
+           ],
+          "groups": [
+          ]
+       }
+   ]
+}
