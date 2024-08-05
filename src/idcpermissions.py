@@ -3,6 +3,7 @@ import argparse
 import sys
 import os
 import json
+import csv
 
 def get_identity_center_user_id(identity_store_id, username):
     """
@@ -70,6 +71,48 @@ def get_account_name(account_id):
         print(f"An error occurred while fetching the account name: {e}")
         return None
 
+def list_permission_sets_for_account(instance_arn, account_id):
+    sso_client = boto3.client('sso-admin')
+
+    # List all permission sets for the instance
+    permission_sets = []
+    paginator = sso_client.get_paginator('list_permission_sets')
+    for page in paginator.paginate(InstanceArn=instance_arn):
+        permission_sets.extend(page['PermissionSets'])
+
+    # Prepare a list to hold detailed permission sets with their assignments
+    detailed_permission_sets = []
+
+    # Loop through each permission set and retrieve its account assignments
+    for permission_set_arn in permission_sets:
+        paginator = sso_client.get_paginator('list_account_assignments')
+        for page in paginator.paginate(
+            InstanceArn=instance_arn,
+            AccountId=account_id,
+            PermissionSetArn=permission_set_arn
+        ):
+            for assignment in page['AccountAssignments']:
+                # Describe the permission set to get its details
+                response = sso_client.describe_permission_set(
+                    InstanceArn=instance_arn,
+                    PermissionSetArn=permission_set_arn
+                )
+
+                permission_set_details = response['PermissionSet']
+                permission_set_details['Assignments'] = []
+
+                # Add the assignment details (user or group)
+                permission_set_details['Assignments'].append({
+                    'PrincipalName': get_principal_name(get_identity_store_id(instance_arn), assignment['PrincipalId'], assignment['PrincipalType']),
+                    'PrincipalType': assignment['PrincipalType'],
+                    'PrincipalId': assignment['PrincipalId'],
+                    'AccountId': assignment['AccountId']
+                })
+
+                detailed_permission_sets.append(permission_set_details)
+
+    return detailed_permission_sets
+
 
 def get_permission_sets(instance_arn):
     sso_admin_client = boto3.client('sso-admin')
@@ -102,16 +145,28 @@ def get_permission_set_arn(instance_arn, permission_set_name):
 
 
 
-def get_principal_name(identity_store_id, user_id):
+def get_principal_name(identity_store_id, principal_id, principal_type):
     identitystore_client = boto3.client('identitystore')
-    try:
-        response = identitystore_client.describe_user(
-            IdentityStoreId=identity_store_id,
-            UserId=user_id
-        )
-        return response['UserName']
-    except identitystore_client.exceptions.ResourceNotFoundException:
-        return "Unknown"
+
+    if principal_type == 'USER':
+        try:
+            response = identitystore_client.describe_user(
+                IdentityStoreId=identity_store_id,
+                UserId=principal_id
+            )
+            return response['UserName']
+        except identitystore_client.exceptions.ResourceNotFoundException:
+            return "Unknown"
+    elif principal_type == 'GROUP':
+        try:
+            response = identitystore_client.describe_group(
+                IdentityStoreId=identity_store_id,
+                GroupId=principal_id
+            )
+            return response['DisplayName']
+        except identitystore_client.exceptions.ResourceNotFoundException:
+            return "Unknown"
+        
 
 
 def get_group_id_by_name(identity_store_id, group_name):
@@ -173,7 +228,7 @@ def list_account_assignments(instance_arn, account_id):
         ):
             for assignment in page['AccountAssignments']:
                 principal_id = assignment['PrincipalId']
-                principal_name = get_principal_name(identity_store_id, principal_id)
+                principal_name = get_principal_name(identity_store_id, principal_id, assisnment['PrincipalType'])
                 account_assignments.append({
                     'PrincipalName': principal_name,
                     'PrincipalId': principal_id,
@@ -522,6 +577,11 @@ def main():
         default = os.environ.get("SSO_INSTANCE_ARN", "")
     )
     parser.add_argument(
+        '--list',
+        action = 'store_true',
+        help = 'Export all permission sets for a given account ID'
+    )
+    parser.add_argument(
         '--account_id',
         action = 'store',
         help = 'The ID of the target AWS account.'
@@ -557,6 +617,11 @@ def main():
         help = 'The name of the permission set. Add or remove the permission set for a username to/from an account.'
     )
     parser.add_argument(
+        '--out',
+        action = 'store',
+        help = 'The name of the output file.'
+    )
+    parser.add_argument(
         '--cleanup',
         action = 'store_true',
         help = '"Clean up orphaned users from AWS Identity Center by removing users who no longer have associated accounts or roles."'
@@ -574,9 +639,30 @@ def main():
     if args.remove:
         if not (args.all or args.file or args.permission_set):
             parser.error(f"Usage: python {sys.argv[0]} --remove [--all | --file <file_name> | --permission_set <name>]")
+   # Check if --list is provided
+    if args.list:
+        if not (args.account_id):
+            parser.error(f"Usage: python {sys.argv[0]} --list [--account_id <accountID>]")
     
     
-    if args.remove and args.all:
+    if args.list:
+        permission_sets = list_permission_sets_for_account(args.instance_arn, args.account_id)
+
+        if args.out:
+            with open(args.out, 'w', newline='') as csvfile:
+                csvwriter = csv.writer(csvfile)
+                csvwriter.writerow(["PrincipalName", "PermissionSetName", "PrincipalType", "PrincipalId", "AccountId"])
+                for ps in permission_sets:
+                    for assignment in ps.get('Assignments', []):
+                        csvwriter.writerow([assignment['PrincipalName'], ps['Name'], assignment['PrincipalType'], assignment['PrincipalId'], assignment['AccountId']])
+            print(f"Output written to {args.out}")
+        else:
+            print("PrincipalName,PermissionSetName,PrincipalType,PrincipalId,AccountId")
+            for ps in permission_sets:
+                for assignment in ps.get('Assignments', []):
+                    print(f"{assignment['PrincipalName']},{ps['Name']},{assignment['PrincipalType']},{assignment['PrincipalId']},{assignment['AccountId']}")
+
+    elif args.remove and args.all:
         user_id = get_identity_store_id(args.username)
         revole_all_permissions(args.instance_arn, args.account_id, user_id, 'USER')
     elif args.remove and args.permission_set:
