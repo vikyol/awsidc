@@ -1,46 +1,8 @@
 import boto3
-import argparse
-import sys
-import os
+from botocore.exceptions import ClientError
 import json
-import csv
-
-def get_identity_center_user_id(identity_store_id, username):
-    """
-    Retrieves the AWS Identity Center (formerly AWS SSO) UserId for a given username.
-    
-    Args:
-    - identity_store_id (str): The ID of the Identity Store associated with your AWS Identity Center instance.
-    - username (str): The username in AWS Identity Center.
-    
-    Returns:
-    - str: The UserId of the user, or None if not found.
-    """
-    # Initialize a session using the default profile or environment variables
-    client = boto3.client('identitystore')
-    
-    try:
-        # Search for the user using the username
-        response = client.list_users(
-            IdentityStoreId=identity_store_id,
-            Filters=[{
-                'AttributePath': 'UserName',
-                'AttributeValue': username
-            }]
-        )
-        
-        # Check if the user is found and return the UserId
-        if response['Users']:
-            user_id = response['Users'][0]['UserId']
-            return user_id
-        else:
-            print(f"User with username '{username}' not found.")
-            return None
-    
-    except Exception as e:
-        print(f"An error occurred while fetching the user ID: {e}")
-        return None
-
+from users import *
+from utils import *
 
 
 def get_account_name(account_id):
@@ -71,7 +33,36 @@ def get_account_name(account_id):
         print(f"An error occurred while fetching the account name: {e}")
         return None
 
+
 def list_permission_sets_for_account(instance_arn, account_id):
+    """
+    Retrieves a list of detailed permission set objects for a given AWS Identity Center (formerly AWS SSO) instance 
+    and AWS account. Each permission set object includes information such as the Permission Set ARN, name, 
+    and description.
+
+    Args:
+        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+        account_id (str): The AWS account ID for which to retrieve the permission sets.
+
+    Returns:
+        list: A list of dictionaries where each dictionary represents a detailed permission set object.
+              Each dictionary typically contains keys like 'PermissionSetArn', 'Name', 'Description', etc.
+
+    Example:
+        >>> list_permission_sets_for_account('arn:aws:sso:::instance/ssoins-1234567890abcdef', '123456789012')
+        [
+            {
+                'PermissionSetArn': 'arn:aws:sso:::permissionSet/ssoins-1234567890abcdef/ps-abc123def456ghi789',
+                'Name': 'AdministratorAccess',
+                'Description': 'Provides full access to AWS services'
+            },
+            {
+                'PermissionSetArn': 'arn:aws:sso:::permissionSet/ssoins-1234567890abcdef/ps-xyz987uvw654rst321',
+                'Name': 'ReadOnlyAccess',
+                'Description': 'Provides read-only access to AWS services'
+            }
+        ]
+    """    
     sso_client = boto3.client('sso-admin')
 
     # List all permission sets for the instance
@@ -115,6 +106,16 @@ def list_permission_sets_for_account(instance_arn, account_id):
 
 
 def get_permission_sets(instance_arn):
+    """
+    Retrieves a list of all permission sets in the AWS Identity Center instance.
+
+    Args:
+        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+
+    Returns:
+        list: A list of dictionaries where each dictionary represents a detailed permission set object.
+              Each dictionary typically contains keys like 'PermissionSetArn', 'Name', 'Description', etc.
+    """
     sso_admin_client = boto3.client('sso-admin')
     permission_sets = []
     paginator = sso_admin_client.get_paginator('list_permission_sets')
@@ -123,7 +124,6 @@ def get_permission_sets(instance_arn):
         permission_sets.extend(page['PermissionSets'])
     
     return permission_sets
-
 
 
 def get_permission_set_arn(instance_arn, permission_set_name):
@@ -143,59 +143,6 @@ def get_permission_set_arn(instance_arn, permission_set_name):
 
     return None  # Return None if the permission set name is not found
 
-
-
-def get_principal_name(identity_store_id, principal_id, principal_type):
-    identitystore_client = boto3.client('identitystore')
-
-    if principal_type == 'USER':
-        try:
-            response = identitystore_client.describe_user(
-                IdentityStoreId=identity_store_id,
-                UserId=principal_id
-            )
-            return response['UserName']
-        except identitystore_client.exceptions.ResourceNotFoundException:
-            return "Unknown"
-    elif principal_type == 'GROUP':
-        try:
-            response = identitystore_client.describe_group(
-                IdentityStoreId=identity_store_id,
-                GroupId=principal_id
-            )
-            return response['DisplayName']
-        except identitystore_client.exceptions.ResourceNotFoundException:
-            return "Unknown"
-        
-
-
-def get_group_id_by_name(identity_store_id, group_name):
-    """
-    Fetches the group ID from AWS Identity Center (formerly AWS SSO) based on the group name.
-    
-    Args:
-    - identity_store_id (str): The ID of the AWS Identity Center (SSO) Identity Store.
-    - group_name (str): The name of the group whose ID you want to retrieve.
-    
-    Returns:
-    - str: The ID of the group if found, otherwise None.
-    """
-    client = boto3.client('identitystore')
-
-    try:
-        # Paginate through groups to find the matching group name
-        paginator = client.get_paginator('list_groups')
-        for page in paginator.paginate(IdentityStoreId=identity_store_id):
-            for group in page['Groups']:
-                if group['DisplayName'] == group_name:
-                    return group['GroupId']
-        
-        print(f"Group '{group_name}' not found.")
-        return None
-    
-    except Exception as e:
-        print(f"An error occurred while fetching the group ID: {e}")
-        return None
 
 
 def list_account_assignments(instance_arn, account_id):
@@ -251,29 +198,6 @@ def get_account_assignments(instance_arn, account_id, permission_set_arn):
         assignments.extend(page['AccountAssignments'])
     
     return assignments
-
-
-"""
-Reads a list of user emails from a specified file.
-
-Args:
-- file_path (str): The path to the file containing user emails.
-
-Returns:
-- List[str]: A list of user emails.
-"""
-def get_users_from_file(file_path):
-    try:
-        with open(file_path, 'r') as file:
-            # Read all lines from the file and strip any leading/trailing whitespace
-            users = [line.strip() for line in file if line.strip()]
-        return users
-    except FileNotFoundError:
-        print(f"Error: The file at {file_path} was not found.")
-        return []
-    except Exception as e:
-        print(f"An error occurred while reading the file: {e}")
-        return []
 
 
 def assign_users_to_permission_set(instance_arn, account_id, permission_set_arn, user_ids):
@@ -334,6 +258,20 @@ def assign_principal_to_permission_set(instance_arn, account_id, principal_id, p
 
 
 def revoke_permission_set_assignment(instance_arn, account_id, principal_id, principal_type, permission_set=None):
+    """
+    Revokes the permission set assigned to a user or group in AWS Identity Center. 
+    Revokes all permission sets if the permission_set is not set.
+    
+    Args:
+    - instance_arn (str): The ARN of the AWS Identity Center instance.
+    - account_id (str): The AWS account ID where the permission set is assigned.
+    - principal_id (str): The ID of the user or group whose permissions are to be revoked.
+    - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
+    - permission_set (str): The ARN of a permission set (None = all permission sets).
+    
+    Returns:
+    - None
+    """    
     sso_admin_client = boto3.client('sso-admin')
    
     permission_sets = []
@@ -356,12 +294,12 @@ def revoke_permission_set_assignment(instance_arn, account_id, principal_id, pri
                     PrincipalType=principal_type,
                     PrincipalId=principal_id
                 )
-                print(f"Removed permission set {permission_set_arn} assignment for {principal_id} from the account {account_id}")
+                #print(f"Removed permission set {permission_set_arn} assignment for {principal_id} from the account {account_id}")
     
 
 def revoke_all_permissions(instance_arnr, account_id, principal_id, principal_type):
     """
-    Revokes all permission sets assigned to a user or group in AWS Identity Center (formerly AWS SSO).
+    Revokes all permission sets assigned to a user or group in AWS Identity Center.
     
     Args:
     - instance_arn (str): The ARN of the AWS Identity Center instance.
@@ -400,43 +338,16 @@ def revoke_all_permissions(instance_arnr, account_id, principal_id, principal_ty
         print(f"An error occurred while revoking permission sets: {e}")
 
 
-
-def load_json(file_path):
-    """
-    Loads JSON data from a specified file.
-    
-    Args:
-    - file_path (str): The path to the JSON file.
-    
-    Returns:
-    - dict: The parsed JSON data as a dictionary.
-    """
-    try:
-        with open(file_path, 'r') as file:
-            data = json.load(file)
-        return data
-    except FileNotFoundError:
-        print(f"Error: The file at {file_path} was not found.")
-        return {}
-    except json.JSONDecodeError as e:
-        print(f"Error: Failed to parse JSON from {file_path}: {e}")
-        return {}
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        return {}
-
-def user_exists(identity_store_id, user_id):
-    identitystore_client = boto3.client('identitystore')
-    try:
-        identitystore_client.describe_user(
-            IdentityStoreId=identity_store_id,
-            UserId=user_id
-        )
-        return True
-    except identitystore_client.exceptions.ResourceNotFoundException:
-        return False
-
 def get_identity_store_id(instance_arn):
+    """
+    Returns the identity store ID associated with an AWS Identity Center Instance
+
+    Args:
+        - instance_arn (str): The ARN of the AWS Identity Center instance.
+
+    Returns:
+        - str (identity store ID)
+    """
     sso_client = boto3.client('sso-admin')
     
     # Retrieve the Identity Store ID using the instance ARN
@@ -447,7 +358,17 @@ def get_identity_store_id(instance_arn):
     
     raise ValueError(f"No Identity Store ID found for instance ARN: {instance_arn}")
 
+
 def cleanup_orphaned_assignments(instance_arn, account_id):
+    """
+    Cleans up orphaned assignments in AWS Identity Center for a given AWS account. 
+    Orphaned assignments occur when a permission set is assigned to a principal (user or group) that no longer exists 
+    or is no longer valid. This function identifies such orphaned assignments and revokes them.
+
+    Args:
+        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+        account_id (str): The AWS account ID for which to clean up orphaned assignments.
+    """
     sso_client = boto3.client('sso-admin')
     identitystore_client = boto3.client('identitystore')
     
@@ -490,9 +411,18 @@ def cleanup_orphaned_assignments(instance_arn, account_id):
 
     print(f"Orphaned assignments cleanup complete for account {account_id}.")
 
-def cleanup_orphaned_assignments_for_all_accounts(instance_arn):
-    org_client = boto3.client('organizations')
 
+def cleanup_orphaned_assignments_for_all_accounts(instance_arn):
+    """
+    Cleans up orphaned assignments in all the accounts in an AWS organizations. 
+    Orphaned assignments occur when a permission set is assigned to a principal (user or group) that no longer exists 
+    or is no longer valid.
+
+    Args:
+        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+    """  
+    org_client = boto3.client('organizations')
+    
     # Get the list of all accounts in the organization
     accounts = []
     paginator = org_client.get_paginator('list_accounts')
@@ -508,7 +438,48 @@ def cleanup_orphaned_assignments_for_all_accounts(instance_arn):
     print("Orphaned assignments cleanup complete for all accounts.")
 
 
-def process_batch_permissions(instance_arn, data):
+def process_batch_permissions(instance_arn, file_name):
+    """
+    Assigns or revokes permissions according to the configuration.
+
+    Args:
+        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+        file_name (str): The name of the file that holds permission sets assignments/revocations according to the metadata.
+
+    Metadata:
+    {
+        "assign": [
+            {
+                "accountId": "100000000001",  # Type: String, Description: AWS Account ID where permissions are to be assigned
+                "permissionSet": "Administrator",  # Type: String, Description: Name of the permission set to be assigned
+                "users": [
+                    "user1@aws.com",  # Type: String, Description: Email addresses or usernames of users to whom the permission set will be assigned
+                    "user2@aws.com"  # Type: String, Description: Another user email or username
+                ],
+                "groups": [
+                    "groupName"  # Type: String, Description: Names of groups to which the permission set will be assigned
+                ]
+            }
+        ],
+        "revoke": [
+            {
+                "accountId": "100000000000",  # Type: String, Description: AWS Account ID where permissions are to be revoked
+                "permissionSet": "Administrator",  # Type: String, Description: Name of the permission set to be revoked
+                "users": [
+                    "user3@aws.com"  # Type: String, Description: Email addresses or usernames of users from whom the permission set will be revoked
+                ],
+                "groups": [
+                    "groupName"  # Type: String, Description: Names of groups from which the permission set will be removed
+                ]
+            }
+        ]
+    }
+    """
+    data = load_json(file_name)
+    if not data:
+        print("Nothing to process, quitting...")
+        return
+
     # Accessing specific parts of the JSON data
     assign_data = data.get('assign', [])
     revoke_data = data.get('revoke', [])
@@ -529,7 +500,6 @@ def process_batch_permissions(instance_arn, data):
             if user_id:
                 assign_principal_to_permission_set(instance_arn, account_id, user_id, principal_type, permission_set_arn)
             
-
 
         groups = assignment.get('groups', [])
         principal_type = 'GROUP'
@@ -566,122 +536,4 @@ def process_batch_permissions(instance_arn, data):
                 print(f"    - {group}")
                 group_id = get_group_id_by_name(get_identity_store_id(instance_arn), group)
                 revoke_permission_set_assignment(instance_arn, account_id, group_id, principal_type, permission_set_arn)
-
-
-def main():
-    parser = argparse.ArgumentParser(description = 'Manage AWS Permissions')
-    parser.add_argument(
-        '--instance_arn',
-        action = 'store',
-        help = 'The ARN of the IAM Identity Center instance under which the operation will be executed.',
-        default = os.environ.get("SSO_INSTANCE_ARN", "")
-    )
-    parser.add_argument(
-        '--list',
-        action = 'store_true',
-        help = 'Export all permission sets for a given account ID'
-    )
-    parser.add_argument(
-        '--account_id',
-        action = 'store',
-        help = 'The ID of the target AWS account.'
-    )
-    parser.add_argument(
-        '--username',
-        action = 'store',
-        help = 'The user whose access will be updated or revoked.'
-    )
-    parser.add_argument(
-        '--assign',
-        action = 'store_true',
-        help = 'Assigns the specified permission set to a user in an account.'
-    )
-    parser.add_argument(
-        '--remove',
-        action = 'store_true',
-        help = 'Removes permission sets assigned to a user from an account.'
-    )
-    parser.add_argument(
-        '--all',
-        action = 'store_true',
-        help = 'Removes all permission sets for a username from an account.'
-    )
-    parser.add_argument(
-        '--permission_set',
-        action = 'store',
-        help = 'The name of the permission set. Add or remove the permission set for a username to/from an account.'
-    )
-    parser.add_argument(
-        '--file',
-        action = 'store',
-        help = 'The name of the permission set. Add or remove the permission set for a username to/from an account.'
-    )
-    parser.add_argument(
-        '--out',
-        action = 'store',
-        help = 'The name of the output file.'
-    )
-    parser.add_argument(
-        '--cleanup',
-        action = 'store_true',
-        help = '"Clean up orphaned users from AWS Identity Center by removing users who no longer have associated accounts or roles."'
-    )
-
-
-    # Parse the arguments
-    args = parser.parse_args()
-   # Check if --remove is provided
-    if args.assign or args.remove or args.cleanup:
-        # Enforce that --account_id and --username are required
-        if not args.account_id:
-            parser.error("Target account ID is missinig. Please provide it with --account_id")
-   # Check if --remove is provided
-    if args.remove:
-        if not (args.all or args.file or args.permission_set):
-            parser.error(f"Usage: python {sys.argv[0]} --remove [--all | --file <file_name> | --permission_set <name>]")
-   # Check if --list is provided
-    if args.list:
-        if not (args.account_id):
-            parser.error(f"Usage: python {sys.argv[0]} --list [--account_id <accountID>]")
-    
-    
-    if args.list:
-        permission_sets = list_permission_sets_for_account(args.instance_arn, args.account_id)
-
-        if args.out:
-            with open(args.out, 'w', newline='') as csvfile:
-                csvwriter = csv.writer(csvfile)
-                csvwriter.writerow(["PrincipalName", "PermissionSetName", "PrincipalType", "PrincipalId", "AccountId"])
-                for ps in permission_sets:
-                    for assignment in ps.get('Assignments', []):
-                        csvwriter.writerow([assignment['PrincipalName'], ps['Name'], assignment['PrincipalType'], assignment['PrincipalId'], assignment['AccountId']])
-            print(f"Output written to {args.out}")
-        else:
-            print("PrincipalName,PermissionSetName,PrincipalType,PrincipalId,AccountId")
-            for ps in permission_sets:
-                for assignment in ps.get('Assignments', []):
-                    print(f"{assignment['PrincipalName']},{ps['Name']},{assignment['PrincipalType']},{assignment['PrincipalId']},{assignment['AccountId']}")
-
-    elif args.remove and args.all:
-        user_id = get_identity_store_id(args.username)
-        revole_all_permissions(args.instance_arn, args.account_id, user_id, 'USER')
-    elif args.remove and args.permission_set:
-        user_id = get_identity_store_id(args.username)
-        permission_set_arn = get_permission_set_arn(args.instance_arn, args.permission_set)
-        revoke_permission_set_assignment(instance_arn, account_id, user_id, 'USER', permission_set_arn)
-    elif args.cleanup:
-        cleanup_orphaned_assignments(args.instance_arn, args.account_id) 
-    elif args.assign:
-        users = get_users_from_file(args.file)
-        if len(users) > 0:
-            assign_users_to_permission_set(args.instance_arn, account_id, permission_set_arn, user_ids)
-    elif args.file:
-        data = load_json(args.file)
-        if data:
-            process_batch_permissions(args.instance_arn, data)
-
-        
-
-if __name__ == "__main__":
-    main()
 
