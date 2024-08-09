@@ -171,9 +171,9 @@ def main():
         else:
             print("Required arguments [--account | --all]")
     elif args.batch:
-        process_batch_permissions(args.instance_arn, args.file)
+        process_batch_permissions(context, args.file)
     elif args.find_users:
-        usernames = find_users_by_displayname(idc_store_id, args.find_users)
+        usernames = find_users_by_displayname(context['idc_store_id'], args.find_users)
     
         for user in usernames:
             print(f"{user['UserName']}")
