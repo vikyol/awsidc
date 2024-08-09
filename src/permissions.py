@@ -33,6 +33,29 @@ def get_account_name(account_id):
         print(f"An error occurred while fetching the account name: {e}")
         return None
 
+def get_permission_set_name(instance_arn, permission_set_arn):
+    """
+    Retrieves the name of a permission set given its ARN.
+
+    :param instance_arn: The ARN of the Identity Center instance.
+    :param permission_set_arn: The ARN of the permission set.
+    :return: The name of the permission set, or None if not found.
+    """
+    client = boto3.client('sso-admin')
+
+    try:
+        response = client.describe_permission_set(
+            InstanceArn=instance_arn,
+            PermissionSetArn=permission_set_arn
+        )
+        permission_set_name = response['PermissionSet']['Name']
+        return permission_set_name
+    except client.exceptions.ResourceNotFoundException:
+        print(f"Permission set with ARN {permission_set_arn} not found.")
+        return None
+    except Exception as e:
+        print(f"An error occurred: {str(e)}")
+        return None
 
 def list_permission_sets_for_account(instance_arn, account_id):
     """
@@ -257,83 +280,50 @@ def assign_principal_to_permission_set(instance_arn, account_id, principal_id, p
         return None
 
 
-def revoke_permission_set_assignment(instance_arn, account_id, principal_id, principal_type, permission_set=None):
+def revoke_permissions(context, principal_id, principal_type, permission_set=None):
     """
-    Revokes the permission set assigned to a user or group in AWS Identity Center. 
-    Revokes all permission sets if the permission_set is not set.
+    Revokes permission sets assigned to a user or group in AWS Identity Center. 
+    Revokes the specified permission set assigment if provided, otherwise revokes all assignments.
     
     Args:
     - instance_arn (str): The ARN of the AWS Identity Center instance.
     - account_id (str): The AWS account ID where the permission set is assigned.
     - principal_id (str): The ID of the user or group whose permissions are to be revoked.
     - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
-    - permission_set (str): The ARN of a permission set (None = all permission sets).
+    - permission_set (str): The ARN of a permission set assignment to remove. Removes all if set to None.
     
     Returns:
     - None
-    """    
-    sso_admin_client = boto3.client('sso-admin')
-   
-    permission_sets = []
-    if permission_set == None:
-        # Get all permission sets
-        permission_sets = get_permission_sets(instance_arn)
-    else:
-        permission_sets.append(permission_set)
-            
-    
-    for permission_set_arn in permission_sets:
-        assignments = get_account_assignments(instance_arn, account_id, permission_set_arn)
-        for assignment in assignments:
-            if assignment['PrincipalId'] == principal_id and assignment['PrincipalType'] == principal_type:
-                sso_admin_client.delete_account_assignment(
-                    InstanceArn=instance_arn,
-                    TargetId=account_id,
-                    TargetType='AWS_ACCOUNT',
-                    PermissionSetArn=permission_set_arn,
-                    PrincipalType=principal_type,
-                    PrincipalId=principal_id
-                )
-                #print(f"Removed permission set {permission_set_arn} assignment for {principal_id} from the account {account_id}")
-    
+    """
+    sso_client = boto3.client('sso-admin')
 
-def revoke_all_permissions(instance_arnr, account_id, principal_id, principal_type):
-    """
-    Revokes all permission sets assigned to a user or group in AWS Identity Center.
-    
-    Args:
-    - instance_arn (str): The ARN of the AWS Identity Center instance.
-    - account_id (str): The AWS account ID where the permission set is assigned.
-    - principal_id (str): The ID of the user or group whose permissions are to be revoked.
-    - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
-    
-    Returns:
-    - None
-    """
-    client = boto3.client('sso-admin')
+    principal_name = get_principal_name(context['idc_store_id'], principal_id, principal_type)
 
     try:
-        # List all permission sets for the account
-        paginator = client.get_paginator('list_account_assignments')
+        paginator = sso_client.get_paginator('list_account_assignments_for_principal')
         for page in paginator.paginate(
-            InstanceArn=instance_arn,
-            AccountId=account_id,
+            InstanceArn=context['instance_arn'],
+            Filter={
+                'AccountId':context['account_id']
+            },
             PrincipalType=principal_type,
             PrincipalId=principal_id
         ):
             for assignment in page['AccountAssignments']:
-                permission_set_arn = assignment['PermissionSetArn']
-                
-                # Revoke the permission set assignment
-                revoke_permission_set_assignment(
-                    instance_arn,
-                    account_id,
-                    principal_id,
-                    principal_type,
-                    permission_set_arn
-                )
-                print(f"Revoked permission set {permission_set_arn} from {principal_type.lower()} {principal_id}.")
-    
+                permission_set_name = get_permission_set_name(context['instance_arn'], assignment['PermissionSetArn'])
+                if permission_set == None or assignment['PermissionSetArn'] == permission_set:
+                    if context['dry']:
+                        print(f"[Dry Run] Revoke permission set {assignment['PermissionSetArn']} ({permission_set_name}) from user {principal_name}")
+                    else:
+                        sso_client.delete_account_assignment(
+                            InstanceArn=context['instance_arn'],
+                            TargetId=context['account_id'],
+                            TargetType='AWS_ACCOUNT',
+                            PrincipalType=principal_type,
+                            PrincipalId=principal_id,
+                            PermissionSetArn=assignment['PermissionSetArn']
+                        )
+                        print(f"Revoked permission set {assignment['PermissionSetArn']} from user {get_principal_name(context['idc_store_id'], principal_id, principal_type)}")
     except Exception as e:
         print(f"An error occurred while revoking permission sets: {e}")
 

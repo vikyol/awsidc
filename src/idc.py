@@ -13,8 +13,8 @@ def main():
         usage=(
             "%(prog)s --instance_arn <arn>\n" 
             "         --list --account_id <accountID> | [--out <out.csv>]\n"
-            "         --remove --account_id <accountID> --username <username>\n"
-            "         --assign --account_id <accountID> --file <file_name> --permission_set <permissionSet>\n"
+            "         --remove --account_id <accountID> --username <username> [--all | --permission_set <name>]\n"
+            "         --assign --account_id <accountID> --permission_set <name> [--file <file_name> | --username <name>]\n"
             "         --cleanup [--account_id <accountID> | --all]\n"
             "         --find_users <users>"
         )
@@ -85,6 +85,11 @@ def main():
         metavar='OUTPUT_FILE_NAME'
     )
     parser.add_argument(
+        '--dry',
+        action = 'store_true',
+        help = 'Dry run',
+    )
+    parser.add_argument(
         '--cleanup',
         action = 'store_true',
         help = "Clean up orphaned users from AWS Identity Center by removing users who no longer have associated accounts or roles."
@@ -94,7 +99,6 @@ def main():
     # Parse the arguments
     args = parser.parse_args()
 
-    idc_store_id = get_identity_store_id(args.instance_arn)
 
    # Check if --remove is provided
     if args.assign or args.remove or args.cleanup:
@@ -110,9 +114,15 @@ def main():
         if not (args.account_id):
             parser.error(f"Usage: python {sys.argv[0]} --list [--account_id <accountID>]")
     
+    context = {}
+
+    context['dry'] = args.dry
+    context['instance_arn'] = args.instance_arn
+    context['idc_store_id'] = get_identity_store_id(args.instance_arn)
+    context['account_id'] = args.account_id
     
     if args.list:
-        permission_sets = list_permission_sets_for_account(args.instance_arn, args.account_id)
+        permission_sets = list_permission_sets_for_account(account_id)
 
         if args.out:
             with open(args.out, 'w', newline='') as csvfile:
@@ -143,13 +153,14 @@ def main():
             print(user_ids)
             assign_users_to_permission_set(args.instance_arn, args.account_id, permission_set_arn, user_ids)
     elif args.remove:
+        user_id = get_identity_center_user_id(context['idc_store_id'], args.username)
         if args.all:
-            user_id = get_identity_center_user_id(args.instance_arn, args.username)
-            revoke_all_permissions(args.instance_arn, args.account_id, user_id, 'USER')
+            revoke_permissions(context, user_id, 'USER')
         elif args.permission_set:
-            user_id = get_identity_center_user_id(args.instance_arn, args.username)
             permission_set_arn = get_permission_set_arn(args.instance_arn, args.permission_set)
-            revoke_permission_set_assignment(instance_arn, account_id, user_id, 'USER', permission_set_arn)
+            revoke_permissions(context, user_id, 'USER', permission_set_arn)
+        else:
+            print("Missing a required parameter: [--all | --permission_set]")
     elif args.cleanup:
         if args.account_id:
             cleanup_orphaned_assignments(args.instance_arn, args.account_id) 
