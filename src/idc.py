@@ -101,7 +101,7 @@ def main():
 
 
    # Check if --remove is provided
-    if args.assign or args.remove or args.cleanup:
+    if args.assign or args.remove or (args.cleanup and not args.all):
         # Enforce that --account_id and --username are required
         if not args.account_id:
             parser.error("Target account ID is missinig. Please provide it with --account_id")
@@ -113,6 +113,8 @@ def main():
     if args.list:
         if not (args.account_id):
             parser.error(f"Usage: python {sys.argv[0]} --list [--account_id <accountID>]")
+    if args.cleanup and not args.all:
+        parser.error(f"Usage: python {sys.argv[0]} --list [--account_id <accountID>]")
     
     context = {}
 
@@ -163,9 +165,9 @@ def main():
             print("Missing a required parameter: [--all | --permission_set]")
     elif args.cleanup:
         if args.account_id:
-            cleanup_orphaned_assignments(args.instance_arn, args.account_id) 
+            cleanup_orphaned_assignments(context) 
         elif args.all:
-            cleanup_orphaned_assignments_for_all_accounts(args.instance_arn, args.account_id) 
+            cleanup_orphaned_assignments_for_all_accounts(context) 
         else:
             print("Required arguments [--account | --all]")
     elif args.batch:

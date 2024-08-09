@@ -286,11 +286,15 @@ def revoke_permissions(context, principal_id, principal_type, permission_set=Non
     Revokes the specified permission set assigment if provided, otherwise revokes all assignments.
     
     Args:
-    - instance_arn (str): The ARN of the AWS Identity Center instance.
-    - account_id (str): The AWS account ID where the permission set is assigned.
-    - principal_id (str): The ID of the user or group whose permissions are to be revoked.
-    - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
-    - permission_set (str): The ARN of a permission set assignment to remove. Removes all if set to None.
+        - context: {
+            instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+            account_id (str): The AWS account ID for which to clean up orphaned assignments.
+            idc_store_id (str): The identity center store ID.
+            dry (bool(): Dry run
+          }
+        - principal_id (str): The ID of the user or group whose permissions are to be revoked.
+        - principal_type (str): The type of the principal, either 'USER' or 'GROUP'.
+        - permission_set (str): The ARN of a permission set assignment to remove. Removes all if set to None.
     
     Returns:
     - None
@@ -349,69 +353,88 @@ def get_identity_store_id(instance_arn):
     raise ValueError(f"No Identity Store ID found for instance ARN: {instance_arn}")
 
 
-def cleanup_orphaned_assignments(instance_arn, account_id):
+def cleanup_orphaned_assignments(context):
     """
     Cleans up orphaned assignments in AWS Identity Center for a given AWS account. 
     Orphaned assignments occur when a permission set is assigned to a principal (user or group) that no longer exists 
     or is no longer valid. This function identifies such orphaned assignments and revokes them.
 
     Args:
-        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
-        account_id (str): The AWS account ID for which to clean up orphaned assignments.
+        context: {
+            instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+            idc_store_id (str): The identity center store ID.
+            account_id (str): The AWS account ID for which to clean up orphaned assignments.
+            dry (bool(): Dry run
+        }
+
+    Returns: The number of orphaned assignments removed.
     """
-    sso_client = boto3.client('sso-admin')
+    sso_client = boto3.client('sso-admin') 
     identitystore_client = boto3.client('identitystore')
+    count = 0
     
-    # Retrieve the Identity Store ID
-    identity_store_id = get_identity_store_id(instance_arn)
 
     # Get the list of all users in the Identity Store
     user_ids = set()
     paginator = identitystore_client.get_paginator('list_users')
-    for page in paginator.paginate(IdentityStoreId=identity_store_id):
+    for page in paginator.paginate(IdentityStoreId=context['idc_store_id']):
         for user in page['Users']:
             user_ids.add(user['UserId'])
 
     # Get the list of all permission sets
     permission_sets = []
     paginator = sso_client.get_paginator('list_permission_sets')
-    for page in paginator.paginate(InstanceArn=instance_arn):
+    for page in paginator.paginate(InstanceArn=context['instance_arn']):
         permission_sets.extend(page['PermissionSets'])
 
     # Loop over each permission set to clean up orphaned assignments for the specific account
     for permission_set_arn in permission_sets:
         paginator = sso_client.get_paginator('list_account_assignments')
         for page in paginator.paginate(
-            InstanceArn=instance_arn,
-            AccountId=account_id,
+            InstanceArn=context['instance_arn'],
+            AccountId=context['account_id'],
             PermissionSetArn=permission_set_arn
         ):
             for assignment in page['AccountAssignments']:
                 if assignment['PrincipalType'] == 'USER' and assignment['PrincipalId'] not in user_ids:
                     # Orphaned assignment found, remove it
-                    print(f"Removing orphaned assignment for account {account_id}: {assignment}")
-                    sso_client.delete_account_assignment(
-                        InstanceArn=instance_arn,
-                        PermissionSetArn=permission_set_arn,
-                        PrincipalType=assignment['PrincipalType'],
-                        PrincipalId=assignment['PrincipalId'],
-                        TargetId=account_id,
-                        TargetType='AWS_ACCOUNT'
-                    )
+                    if context['dry']:
+                        count += 1
+                    else:
+                        sso_client.delete_account_assignment(
+                            InstanceArn=context['instance_arn'],
+                            PermissionSetArn=permission_set_arn,
+                            PrincipalType=assignment['PrincipalType'],
+                            PrincipalId=assignment['PrincipalId'],
+                            TargetId=context['account_id'],
+                            TargetType='AWS_ACCOUNT'
+                        )
+                        count += 1
 
-    print(f"Orphaned assignments cleanup complete for account {account_id}.")
+    if context['dry']:
+        print(f'[Dry Run] - There are {count} orphaned assignments to remove')
+    else:
+        print(f"Cleaned up {count} orphaned assignments from {context['account_id']}")
+
+    return count
 
 
-def cleanup_orphaned_assignments_for_all_accounts(instance_arn):
+def cleanup_orphaned_assignments_for_all_accounts(context):
     """
     Cleans up orphaned assignments in all the accounts in an AWS organizations. 
     Orphaned assignments occur when a permission set is assigned to a principal (user or group) that no longer exists 
     or is no longer valid.
 
     Args:
-        instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+        context: {
+            instance_arn (str): The Amazon Resource Name (ARN) of the AWS Identity Center instance.
+            idc_store_id (str): The identity center store ID.
+            account_id (str): The AWS account ID for which to clean up orphaned assignments.
+            dry (bool(): Dry run
+        }
     """  
     org_client = boto3.client('organizations')
+    total = 0
     
     # Get the list of all accounts in the organization
     accounts = []
@@ -421,11 +444,15 @@ def cleanup_orphaned_assignments_for_all_accounts(instance_arn):
 
     # Apply cleanup for each account
     for account in accounts:
-        account_id = account['Id']
-        print(f"Starting cleanup for account {account_id} ({account['Name']})...")
-        cleanup_orphaned_assignments(instance_arn, account_id)
+        context['account_id'] = account['Id']
+        print(f"Starting cleanup for account {account['Id']} ({account['Name']})...")
+        count = cleanup_orphaned_assignments(context)
+        total += count
 
-    print("Orphaned assignments cleanup complete for all accounts.")
+    if context['dry']:
+        print(f"[Dry Run] There are total of {total} orphaned assignments to remove.")
+    else:
+        print(f"Orphaned assignments cleanup complete for all accounts.\nTotal {total} assignments has been removed.")
 
 
 def process_batch_permissions(instance_arn, file_name):
